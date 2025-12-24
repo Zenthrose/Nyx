@@ -25,46 +25,33 @@
 
 namespace fs = std::filesystem;
 
-// Mesa driver detection and installation prompt
+// Mesa driver detection (simplified to avoid build issues)
 void checkMesaDrivers() {
-    // Check for Mesa Vulkan drivers
+    // Simple check for Mesa drivers
     bool mesa_found = false;
 
-    // Method 1: Check for package (Linux)
-    FILE* pipe = popen("dpkg -l | grep mesa-vulkan-drivers", "r");
-    if (pipe) {
-        char buffer[128];
-        if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    // Check Vulkan ICD files
+    std::vector<std::string> icd_paths = {
+        "/usr/share/vulkan/icd.d/intel_icd.x86_64.json",
+        "/usr/share/vulkan/icd.d/intel_icd.i686.json"
+    };
+    for (const auto& path : icd_paths) {
+        if (fs::exists(path)) {
             mesa_found = true;
-        }
-        pclose(pipe);
-    }
-
-    // Method 2: Check Vulkan ICD files
-    if (!mesa_found) {
-        std::vector<std::string> icd_paths = {
-            "/usr/share/vulkan/icd.d/intel_icd.x86_64.json",
-            "/usr/share/vulkan/icd.d/intel_icd.i686.json"
-        };
-        for (const auto& path : icd_paths) {
-            if (fs::exists(path)) {
-                mesa_found = true;
-                break;
-            }
+            break;
         }
     }
 
     if (!mesa_found) {
         std::cout << std::endl;
         std::cout << "⚠️  WARNING: Mesa Vulkan drivers not detected!" << std::endl;
-        std::cout << "For optimal Xe GPU performance and to prevent std::bad_alloc errors:" << std::endl;
+        std::cout << "For optimal Xe GPU performance:" << std::endl;
         std::cout << "  sudo apt update && sudo apt install mesa-vulkan-drivers" << std::endl;
         std::cout << "  export INTEL_DEBUG=alloc" << std::endl;
         std::cout << "  export MESA_VK_ABORT_ON_DEVICE_LOSS=0" << std::endl;
         std::cout << std::endl;
-        std::cout << "Press Enter to continue with reduced performance, or Ctrl+C to install drivers first..." << std::endl;
+        std::cout << "Press Enter to continue anyway..." << std::endl;
 
-        // Non-blocking wait for user input
         std::string dummy;
         std::getline(std::cin, dummy);
     } else {
@@ -207,20 +194,20 @@ void adapt_config_to_hardware(ResourceAwareHRMConfig& config, const HardwareCapa
                                hw_caps.gpu_name.find("Xe") != std::string::npos;
 
     if (is_xe_or_integrated) {
-        // EMERGENCY Xe GPU settings - very aggressive memory reduction
-        std::cout << "EMERGENCY: Xe GPU detected - applying minimum viable parameters" << std::endl;
-        config.base_config.base_config.hrm_config.inner_config.hidden_size = 64;
-        config.base_config.base_config.hrm_config.inner_config.H_layers = 1;
-        config.base_config.base_config.hrm_config.inner_config.L_layers = 1;
-        config.base_config.base_config.hrm_config.inner_config.vocab_size = 32;  // Minimum vocab for character-level
+        // Xe GPU settings - align with training config for consistency
+        std::cout << "Xe GPU detected - aligning model parameters with training config" << std::endl;
+        config.base_config.base_config.hrm_config.inner_config.hidden_size = 128;  // Match training config
+        config.base_config.base_config.hrm_config.inner_config.H_layers = 2;
+        config.base_config.base_config.hrm_config.inner_config.L_layers = 2;
+        config.base_config.base_config.hrm_config.inner_config.vocab_size = 128;  // Match training vocab
         config.base_config.base_config.hrm_config.inner_config.batch_size = 1;
-        config.base_config.base_config.hrm_config.inner_config.seq_len = 32;  // Very short sequences
+        config.base_config.base_config.hrm_config.inner_config.seq_len = 128;
 
-        // Reduce task memory limits drastically
-        config.max_memory_per_task_mb = 50;  // Very conservative
+        // Conservative task memory limits
+        config.max_memory_per_task_mb = 128;
 
-        std::cout << "EMERGENCY Xe config: 64 hidden, 1 layer, 32 vocab" << std::endl;
-        std::cout << "Estimated memory usage: <25MB (minimum viable for Xe)" << std::endl;
+        std::cout << "Xe-aligned config: 128 hidden, 2 layers, 128 vocab (matches training)" << std::endl;
+        std::cout << "Estimated memory usage: ~150MB (compatible with Xe allocation limits)" << std::endl;
 
     } else if (hw_caps.gpu_memory_mb < 12288) {  // < 12GB cannot safely handle full HRM config
         std::cout << "GPU memory constrained (" << hw_caps.gpu_memory_mb
@@ -466,7 +453,7 @@ VulkanResources initializeVulkan() {
         throw std::runtime_error("Failed to create Vulkan device: " + std::to_string(deviceResult));
     }
 
-    // Query GPU memory limits for allocation validation
+    // Query TRUE GPU memory allocation limits (not just heap size)
     VkPhysicalDeviceMaintenance3Properties maint3Props = {};
     maint3Props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
 
@@ -477,7 +464,8 @@ VulkanResources initializeVulkan() {
     vkGetPhysicalDeviceProperties2(res.physicalDevice, &deviceProps2);
 
     res.maxMemoryAllocationSize = maint3Props.maxMemoryAllocationSize;
-    std::cout << "GPU max memory allocation size: " << res.maxMemoryAllocationSize / (1024 * 1024) << " MB" << std::endl;
+    std::cout << "GPU max per-allocation size: " << res.maxMemoryAllocationSize / (1024 * 1024) << " MB" << std::endl;
+    std::cout << "GPU heap size: " << deviceProps2.properties.limits.maxMemoryAllocationCount * maint3Props.maxMemoryAllocationSize / (1024 * 1024) << " MB" << std::endl;
 
     // Validate that GPU can handle basic allocations
     const VkDeviceSize MIN_REQUIRED_ALLOCATION = 32 * 1024 * 1024; // 32MB minimum

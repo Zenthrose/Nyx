@@ -33,14 +33,31 @@ void VulkanResourceManager::createBuffer(VkDeviceSize size, VkBufferUsageFlags u
         return;
     }
 
-    // Check if allocation would exceed GPU limits (for Xe and integrated GPUs)
-    const VkDeviceSize MAX_SAFE_ALLOCATION = 512 * 1024 * 1024; // 512MB safe limit for Xe GPUs
-    if (size > MAX_SAFE_ALLOCATION) {
+    // Check against TRUE GPU allocation limits (not heap size)
+    // Xe GPUs limit individual allocations to ~4GB despite larger heap reports
+    VkPhysicalDeviceMaintenance3Properties maint3Props = {};
+    maint3Props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+
+    VkPhysicalDeviceProperties2 deviceProps2 = {};
+    deviceProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    deviceProps2.pNext = &maint3Props;
+
+    vkGetPhysicalDeviceProperties2(physicalDevice, &deviceProps2);
+
+    VkDeviceSize trueMaxAllocation = maint3Props.maxMemoryAllocationSize;
+    VkDeviceSize safeAllocationLimit = trueMaxAllocation > 1024 * 1024 * 1024 ?
+                                       trueMaxAllocation * 7 / 10 : // 70% of limit for safety
+                                       512 * 1024 * 1024; // 512MB minimum safe limit
+
+    std::cout << "Buffer allocation check: requested " << size / (1024 * 1024) << "MB, GPU limit " << trueMaxAllocation / (1024 * 1024) << "MB, safe limit " << safeAllocationLimit / (1024 * 1024) << "MB" << std::endl;
+
+    if (size > safeAllocationLimit) {
         // For very large tensors, attempt chunked allocation
-        std::cout << "Large buffer requested (" << size / (1024 * 1024) << "MB), implementing chunked allocation" << std::endl;
-        // For now, reject oversized allocations to prevent std::bad_alloc
+        std::cout << "Large buffer requested (" << size / (1024 * 1024) << "MB), exceeds safe limit (" << safeAllocationLimit / (1024 * 1024) << "MB)" << std::endl;
+
         // TODO: Implement actual chunked buffer support
-        throw std::runtime_error("Buffer size " + std::to_string(size) + " exceeds safe GPU allocation limit of " + std::to_string(MAX_SAFE_ALLOCATION) + " bytes. Reduce model size or use CPU mode.");
+        // For now, provide clear error message with guidance
+        throw std::runtime_error("Buffer allocation of " + std::to_string(size / (1024 * 1024)) + "MB exceeds GPU safe allocation limit of " + std::to_string(safeAllocationLimit / (1024 * 1024)) + "MB. This is likely due to Xe GPU per-allocation caps (~4GB). Try: 1) --cpu flag for CPU training, 2) Reduce model size (hidden/layers), or 3) Update Mesa drivers.");
     }
 
     // Create new buffer if not available in pool
