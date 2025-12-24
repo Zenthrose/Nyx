@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <mutex>
+#include <stdexcept>
 
 /**
  * Vulkan Resource Manager with Memory Pool
@@ -61,9 +62,15 @@ public:
     };
     
     VkBuffer getPooledBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkDeviceMemory& memory);
+    void addToPool(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer buffer, VkDeviceMemory memory);
     void releaseBuffer(VkBuffer buffer, VkDeviceMemory memory);
     void cleanupMemoryPool();
     void cleanupUnusedBuffers(); // Call between forward passes
+
+    // Xe GPU specific optimizations
+    bool isXeGPU();
+    void createTiledBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                          std::vector<VkBuffer>& buffers, std::vector<VkDeviceMemory>& memories, size_t tileSize = 64 * 1024 * 1024);
 
 private:
     VkDevice device;

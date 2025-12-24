@@ -6,17 +6,27 @@
 #include <iterator>
 #include <unordered_map>
 
-CodeAnalysisSystem::CodeAnalysisSystem(const std::string& project_root)
-    : project_root_(project_root) {
+CodeAnalysisSystem::CodeAnalysisSystem(const std::string& project_root, bool lazy_load, size_t max_files, size_t max_file_size_mb)
+    : project_root_(project_root), lazy_load_(lazy_load), max_files_(max_files), max_file_size_mb_(max_file_size_mb), files_discovered_(false) {
     std::cout << "Initializing Code Analysis System..." << std::endl;
-    discover_source_files();
     initialize_bug_patterns();
-    std::cout << "Code Analysis System initialized with " << source_files_.size() << " source files" << std::endl;
+    if (!lazy_load_) {
+        discover_source_files();
+        std::cout << "Code Analysis System initialized with " << source_files_.size() << " source files" << std::endl;
+    } else {
+        std::cout << "Code Analysis System initialized with lazy loading enabled" << std::endl;
+    }
 }
 
 CodeAnalysisResult CodeAnalysisSystem::analyze_codebase() {
     CodeAnalysisResult result;
     result.overall_quality_score = 1.0f;
+
+    // Lazy load source files if not already discovered
+    if (!files_discovered_) {
+        discover_source_files();
+        files_discovered_ = true;
+    }
 
     for (const auto& file_path : source_files_) {
         auto file_result = analyze_file(file_path);
@@ -460,18 +470,46 @@ bool CodeAnalysisSystem::run_unit_tests(const std::vector<CodeModification>& mod
 
 // Private helper methods
 void CodeAnalysisSystem::discover_source_files() {
-    std::cout << "Discovering source files in: " << project_root_ << std::endl;
+    std::cout << "Discovering source files in: " << project_root_ << " (max " << max_files_ << " files, " << max_file_size_mb_ << "MB per file)" << std::endl;
 
     try {
+        size_t files_found = 0;
         for (const auto& entry : fs::recursive_directory_iterator(project_root_)) {
             try {
                 if (entry.is_regular_file()) {
                     std::string path = entry.path().string();
                     std::string ext = entry.path().extension().string();
 
-                    // Only include C/C++ source files
-                    if (ext == ".cpp" || ext == ".hpp" || ext == ".c" || ext == ".h") {
+                    // Check file count limit
+                    if (files_found >= max_files_) {
+                        std::cout << "Reached maximum file limit (" << max_files_ << "), stopping discovery" << std::endl;
+                        break;
+                    }
+
+                    // Only include C/C++ source files in src/, shaders/, tests/
+                    if ((ext == ".cpp" || ext == ".hpp" || ext == ".c" || ext == ".h" || ext == ".comp") &&
+                        (path.find("/src/") != std::string::npos ||
+                         path.find("/shaders/") != std::string::npos ||
+                         path.find("/tests/") != std::string::npos ||
+                         path.find("\\src\\") != std::string::npos ||
+                         path.find("\\shaders\\") != std::string::npos ||
+                         path.find("\\tests\\") != std::string::npos)) {
+
+                        // Check file size limit
+                        try {
+                            auto file_size = fs::file_size(entry.path());
+                            size_t file_size_mb = file_size / (1024 * 1024);
+                            if (file_size_mb > max_file_size_mb_) {
+                                std::cout << "Skipping large file: " << path << " (" << file_size_mb << "MB > " << max_file_size_mb_ << "MB)" << std::endl;
+                                continue;
+                            }
+                        } catch (const std::exception&) {
+                            // Skip files where we can't get size
+                            continue;
+                        }
+
                         source_files_.push_back(path);
+                        files_found++;
                     }
                 }
             } catch (const std::exception& e) {

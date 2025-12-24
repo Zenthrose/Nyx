@@ -5,7 +5,11 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
 #include "quantization_types.hpp"
+#include "vulkan_resource_manager.hpp"
+
+using namespace std;
 
 struct VulkanTrainingConfig {
     uint32_t max_sequence_length = 128;
@@ -37,6 +41,9 @@ public:
     bool save_checkpoint(const std::string& checkpoint_path);
     bool load_checkpoint(const std::string& checkpoint_path);
 
+    // Resource management
+    void releaseBuffersToPool(); // Release buffers back to resource manager pool
+
     // Model management
     bool initialize_model();
     bool save_model(const std::string& model_path);
@@ -66,6 +73,7 @@ private:
     VkDescriptorPool descriptor_pool_;
     VkDescriptorSetLayout descriptor_set_layout_;
     VkPipelineLayout pipeline_layout_;
+    std::unique_ptr<VulkanResourceManager> resource_manager_;
 
     // Shaders and pipelines
     VkShaderModule linear_forward_shader_;

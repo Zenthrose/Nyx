@@ -328,6 +328,7 @@ private:
      * @return Loaded sequences
      */
     std::vector<std::string> load_training_data(const std::string& data_path, float data_percentage = 1.0f);
+    void extract_sequences_from_text(const std::string& content, std::vector<std::string>& sequences, float data_percentage);
     std::vector<std::string> scan_directory_async(const std::string& base_dir);
     std::vector<std::string> generate_system_learning_sequences();
 

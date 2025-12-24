@@ -23,6 +23,9 @@
 
 namespace fs = std::filesystem;
 
+// Configuration validation
+void validate_configuration(ResourceAwareHRMConfig& config, const HardwareCapabilities& hw_caps);
+
 // Default configuration with hardware adaptation
 ResourceAwareHRMConfig createDefaultHRMConfig(const HardwareCapabilities& hw_caps) {
     ResourceAwareHRMConfig config;
@@ -53,16 +56,12 @@ ResourceAwareHRMConfig createDefaultHRMConfig(const HardwareCapabilities& hw_cap
               << (config.base_config.base_config.meta_config.enable_self_repair ? "true" : "false")
               << std::endl;
 
-    // Use environment variable for project root, default to system root for full scanning
-    if (const char* env_root = std::getenv("HRM_PROJECT_ROOT")) {
+    // Use environment variable for source root, default to project src directory for focused scanning
+    if (const char* env_root = std::getenv("NYX_SOURCE_ROOT")) {
         config.base_config.project_root = env_root;
     } else {
-        // Default to user home directory for comprehensive scanning capability
-        if (const char* home = std::getenv("HOME")) {
-            config.base_config.project_root = home;
-        } else {
-            config.base_config.project_root = "."; // Current directory as fallback
-        }
+        // Default to project src directory for memory-safe scanning
+        config.base_config.project_root = (fs::current_path() / "src").string();
     }
 
     // Use temp directory for compilation
@@ -147,12 +146,23 @@ void adapt_config_to_hardware(ResourceAwareHRMConfig& config, const HardwareCapa
     std::cout << "  GPU Memory: " << hw_caps.gpu_memory_mb << "MB" << std::endl;
     std::cout << "  Integrated GPU: " << (hw_caps.is_integrated_gpu ? "Yes" : "No") << std::endl;
     std::cout << "  Vulkan Available: " << (vulkan.device != VK_NULL_HANDLE ? "Yes" : "No") << std::endl;
+    std::cout << "  System RAM: " << ram_gb << "GB" << std::endl;
+    std::cout << "  CPU Cores: " << cores << std::endl;
 
     // CRITICAL FIX: Apply memory-safe parameters for ANY GPU that cannot handle full HRM config
     // Full config (768 hidden, 4 layers, 100K vocab) requires ~12GB+ GPU memory
-    if (hw_caps.gpu_memory_mb < 12288) {  // < 12GB cannot safely handle full HRM config
+    // Xe GPUs and integrated GPUs need additional restrictions due to Vulkan driver issues
+    bool is_xe_or_integrated = hw_caps.is_integrated_gpu ||
+                               hw_caps.gpu_name.find("Iris") != std::string::npos ||
+                               hw_caps.gpu_name.find("Xe") != std::string::npos;
+
+    if (is_xe_or_integrated || hw_caps.gpu_memory_mb < 12288) {  // Xe/integrated or < 12GB cannot safely handle full HRM config
         std::cout << "GPU memory constrained (" << hw_caps.gpu_memory_mb
-                  << "MB < 12288MB threshold) - applying memory-safe HRM model parameters" << std::endl;
+                  << "MB < 12288MB threshold";
+        if (is_xe_or_integrated) {
+            std::cout << " or Xe/integrated GPU detected";
+        }
+        std::cout << ") - applying memory-safe HRM model parameters" << std::endl;
 
         // Use memory-safe parameters that work on constrained hardware
         config.base_config.base_config.hrm_config.inner_config.hidden_size = 256;
@@ -295,6 +305,34 @@ void adapt_config_to_hardware(ResourceAwareHRMConfig& config, const HardwareCapa
     std::cout << "Configuration adapted - Hidden size: " << config.base_config.base_config.hrm_config.inner_config.hidden_size
               << ", Layers: " << config.base_config.base_config.hrm_config.inner_config.H_layers
               << ", Self-modification: " << (config.base_config.enable_self_modification ? "Enabled" : "Disabled") << std::endl;
+
+    // Final configuration validation
+    validate_configuration(config, hw_caps);
+}
+
+// Validate configuration to prevent over-allocation
+void validate_configuration(ResourceAwareHRMConfig& config, const HardwareCapabilities& hw_caps) {
+    uint64_t ram_gb = hw_caps.total_ram_bytes / (1024ULL * 1024 * 1024);
+
+    // Memory validation
+    if (config.max_memory_per_task_mb > ram_gb * 512) {  // Max 50% of RAM per task
+        config.max_memory_per_task_mb = ram_gb * 512;
+        std::cout << "Adjusted max_memory_per_task_mb to " << config.max_memory_per_task_mb << "MB based on available RAM" << std::endl;
+    }
+
+    // GPU memory validation
+    if (hw_caps.gpu_memory_mb > 0 && config.max_memory_per_task_mb > hw_caps.gpu_memory_mb / 2) {
+        config.max_memory_per_task_mb = hw_caps.gpu_memory_mb / 2;
+        std::cout << "Adjusted max_memory_per_task_mb to " << config.max_memory_per_task_mb << "MB based on GPU memory" << std::endl;
+    }
+
+    // CPU core validation
+    if (config.max_cpu_per_task_percent > 100.0f / hw_caps.cpu_cores) {
+        config.max_cpu_per_task_percent = 100.0f / hw_caps.cpu_cores;
+        std::cout << "Adjusted max_cpu_per_task_percent to " << config.max_cpu_per_task_percent << "% based on CPU cores" << std::endl;
+    }
+
+    std::cout << "Configuration validation completed - system ready for safe operation" << std::endl;
 }
 
 #ifndef NO_VULKAN
@@ -615,6 +653,7 @@ int main(int argc, char* argv[]) {
     bool gui_mode = false;
     bool train_mode = false;
     bool test_mode = false;
+    bool cpu_mode = false;
     std::string config_file;
     bool invalid_arg = false;
 
@@ -634,6 +673,8 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--test") {
             test_mode = true;
+        } else if (arg == "--cpu") {
+            cpu_mode = true;
         } else if (arg == "--config" && i + 1 < argc) {
             config_file = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
@@ -733,7 +774,7 @@ int main(int argc, char* argv[]) {
     adapt_config_to_hardware(hrm_config, hw_caps);
 #endif
 
-            hrm = std::make_shared<ResourceAwareHRM>(hrm_config);
+            hrm = ResourceAwareHRM::getInstance(hrm_config);
             logger.info("Nyx emerges from the shadows, ready to guide");
         }
 
@@ -746,20 +787,31 @@ int main(int argc, char* argv[]) {
 
     if (train_mode) {
         // Training mode - reuse existing system to prevent Vulkan conflicts
-        // Don't create new HRM system - reuse the one that will be created for CLI/GUI
-        auto hrm_system = std::make_shared<ResourceAwareHRM>(hrm_config);
+        auto hrm_system = ResourceAwareHRM::getInstance(hrm_config);
 
-        // Reuse existing Vulkan resources if available
+        // Handle CPU-only mode
+        if (cpu_mode) {
+            logger.info("CPU-only training mode enabled - Vulkan will be disabled");
+            // Force CPU-only configuration
+            hrm_config.base_config.base_config.hrm_config.inner_config.vocab_size = 10000;
+            hrm_config.base_config.base_config.hrm_config.inner_config.hidden_size = 128;
+            hrm_config.base_config.base_config.hrm_config.inner_config.H_layers = 1;
+            hrm_config.base_config.base_config.hrm_config.inner_config.L_layers = 1;
+        }
+
+        // Initialize Vulkan resources if available and not in CPU mode
 #ifndef NO_VULKAN
         VulkanResources vulkan_res{};
         bool vulkan_available = false;
-        try {
-            vulkan_res = initializeVulkan();
-            vulkan_available = true;
-            adapt_config_to_hardware(hrm_config, hw_caps, vulkan_res);
-        } catch (const std::exception& e) {
-            logger.warning("Vulkan initialization failed in training mode, using CPU fallback");
-            vulkan_available = false;
+        if (!cpu_mode) {
+            try {
+                vulkan_res = initializeVulkan();
+                vulkan_available = true;
+                adapt_config_to_hardware(hrm_config, hw_caps, vulkan_res);
+            } catch (const std::exception& e) {
+                logger.warning("Vulkan initialization failed in training mode, using CPU fallback");
+                vulkan_available = false;
+            }
         }
 #endif
 
@@ -784,8 +836,8 @@ int main(int argc, char* argv[]) {
 
     // Default mode is CLI
     if (cli_mode) {
-        // CLI mode - initialize and run interactive interface
-        auto hrm_system = std::make_shared<ResourceAwareHRM>(hrm_config);
+        // CLI mode - use singleton HRM system for interactive interface
+        auto hrm_system = ResourceAwareHRM::getInstance(hrm_config);
 
         // Initialize Vulkan resources if available
 #ifndef NO_VULKAN

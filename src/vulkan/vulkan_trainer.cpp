@@ -11,6 +11,8 @@
 #include <thread>
 #include <vector>
 
+using namespace std;
+
 VulkanTrainer::VulkanTrainer(VkDevice device, VkPhysicalDevice physical_device,
                            uint32_t compute_queue_family_index, VkQueue compute_queue,
                            const VulkanTrainingConfig& config)
@@ -18,6 +20,7 @@ VulkanTrainer::VulkanTrainer(VkDevice device, VkPhysicalDevice physical_device,
       compute_queue_family_index_(compute_queue_family_index), compute_queue_(compute_queue),
       command_pool_(VK_NULL_HANDLE), descriptor_pool_(VK_NULL_HANDLE),
       descriptor_set_layout_(VK_NULL_HANDLE), pipeline_layout_(VK_NULL_HANDLE),
+      resource_manager_(std::make_unique<VulkanResourceManager>(device, physical_device, compute_queue, compute_queue_family_index)),
       linear_forward_shader_(VK_NULL_HANDLE), linear_backward_shader_(VK_NULL_HANDLE),
       adam_optimizer_shader_(VK_NULL_HANDLE), cross_entropy_loss_shader_(VK_NULL_HANDLE),
       gradient_accumulation_shader_(VK_NULL_HANDLE),
@@ -31,6 +34,52 @@ VulkanTrainer::VulkanTrainer(VkDevice device, VkPhysicalDevice physical_device,
       adam_m_memory_(VK_NULL_HANDLE), adam_v_memory_(VK_NULL_HANDLE),
       input_memory_(VK_NULL_HANDLE), target_memory_(VK_NULL_HANDLE), loss_memory_(VK_NULL_HANDLE),
       config_(config), current_epoch_(0), current_loss_(0.0f), current_perplexity_(0.0f), timestep_(1) {
+}
+
+void VulkanTrainer::releaseBuffersToPool() {
+    // Release buffers back to resource manager pool for reuse
+    if (resource_manager_) {
+        if (param_buffer_ && param_memory_) {
+            resource_manager_->releaseBuffer(param_buffer_, param_memory_);
+            param_buffer_ = VK_NULL_HANDLE;
+            param_memory_ = VK_NULL_HANDLE;
+        }
+        if (grad_buffer_ && grad_memory_) {
+            resource_manager_->releaseBuffer(grad_buffer_, grad_memory_);
+            grad_buffer_ = VK_NULL_HANDLE;
+            grad_memory_ = VK_NULL_HANDLE;
+        }
+        if (adam_m_buffer_ && adam_m_memory_) {
+            resource_manager_->releaseBuffer(adam_m_buffer_, adam_m_memory_);
+            adam_m_buffer_ = VK_NULL_HANDLE;
+            adam_m_memory_ = VK_NULL_HANDLE;
+        }
+        if (adam_v_buffer_ && adam_v_memory_) {
+            resource_manager_->releaseBuffer(adam_v_buffer_, adam_v_memory_);
+            adam_v_buffer_ = VK_NULL_HANDLE;
+            adam_v_memory_ = VK_NULL_HANDLE;
+        }
+        if (input_buffer_ && input_memory_) {
+            resource_manager_->releaseBuffer(input_buffer_, input_memory_);
+            input_buffer_ = VK_NULL_HANDLE;
+            input_memory_ = VK_NULL_HANDLE;
+        }
+        if (target_buffer_ && target_memory_) {
+            resource_manager_->releaseBuffer(target_buffer_, target_memory_);
+            target_buffer_ = VK_NULL_HANDLE;
+            target_memory_ = VK_NULL_HANDLE;
+        }
+        if (loss_buffer_ && loss_memory_) {
+            resource_manager_->releaseBuffer(loss_buffer_, loss_memory_);
+            loss_buffer_ = VK_NULL_HANDLE;
+            loss_memory_ = VK_NULL_HANDLE;
+        }
+        if (learning_rate_buffer_ && learning_rate_memory_) {
+            resource_manager_->releaseBuffer(learning_rate_buffer_, learning_rate_memory_);
+            learning_rate_buffer_ = VK_NULL_HANDLE;
+            learning_rate_memory_ = VK_NULL_HANDLE;
+        }
+    }
 }
 
 VulkanTrainer::~VulkanTrainer() {
@@ -80,6 +129,8 @@ bool VulkanTrainer::initialize() {
         std::cerr << "Insufficient GPU memory for training configuration" << std::endl;
         return false;
     }
+
+    std::cout << "VulkanTrainer memory validation passed - proceeding with buffer allocation" << std::endl;
 
     // Create descriptor pool
     VkDescriptorPoolSize pool_sizes[] = {
@@ -227,74 +278,15 @@ VkShaderModule VulkanTrainer::create_shader_module(const std::vector<uint32_t>& 
 
 bool VulkanTrainer::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                                 VkBuffer& buffer, VkDeviceMemory& memory) {
-    VkBufferCreateInfo buffer_info = {};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = size;
-    buffer_info.usage = usage;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    if (vkCreateBuffer(device_, &buffer_info, nullptr, &buffer) != VK_SUCCESS) {
-        std::cerr << "Failed to create buffer of size " << size << " bytes" << std::endl;
+    // Use VulkanResourceManager for pooled memory management
+    try {
+        resource_manager_->createBuffer(size, usage, properties, buffer, memory);
+        std::cout << "Successfully created/managed buffer of size " << size << " bytes via resource manager" << std::endl;
+        return true;
+    } catch (const std::runtime_error& e) {
+        std::cerr << "Failed to create buffer via resource manager: " << e.what() << std::endl;
         return false;
     }
-
-    VkMemoryRequirements mem_requirements;
-    vkGetBufferMemoryRequirements(device_, buffer, &mem_requirements);
-
-    // Check if requested size is reasonable (prevent excessive allocations)
-    const VkDeviceSize MAX_REASONABLE_SIZE = 1024 * 1024 * 1024; // 1GB limit
-    if (mem_requirements.size > MAX_REASONABLE_SIZE) {
-        std::cerr << "Requested buffer size " << mem_requirements.size 
-                  << " exceeds maximum reasonable size " << MAX_REASONABLE_SIZE << std::endl;
-        vkDestroyBuffer(device_, buffer, nullptr);
-        return false;
-    }
-
-    VkMemoryAllocateInfo alloc_info = {};
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = mem_requirements.size;
-    alloc_info.memoryTypeIndex = find_memory_type(mem_requirements.memoryTypeBits, properties);
-
-    // Try memory allocation with graceful fallback
-    VkResult alloc_result = vkAllocateMemory(device_, &alloc_info, nullptr, &memory);
-    if (alloc_result != VK_SUCCESS) {
-        std::cerr << "Failed to allocate " << mem_requirements.size << " bytes of memory (error: " << alloc_result << ")" << std::endl;
-        
-        // Try with smaller size if possible (graceful degradation)
-        if (size > 1024 * 1024) { // If original request was > 1MB
-            VkDeviceSize reduced_size = size / 2;
-            std::cerr << "Attempting graceful degradation with reduced size " << reduced_size << " bytes" << std::endl;
-            
-            // Clean up original buffer
-            vkDestroyBuffer(device_, buffer, nullptr);
-            
-            // Recreate with smaller size
-            buffer_info.size = reduced_size;
-            if (vkCreateBuffer(device_, &buffer_info, nullptr, &buffer) == VK_SUCCESS) {
-                vkGetBufferMemoryRequirements(device_, buffer, &mem_requirements);
-                alloc_info.allocationSize = mem_requirements.size;
-                
-                if (vkAllocateMemory(device_, &alloc_info, nullptr, &memory) == VK_SUCCESS) {
-                    vkBindBufferMemory(device_, buffer, memory, 0);
-                    std::cout << "Successfully allocated reduced buffer size " << reduced_size << " bytes" << std::endl;
-                    return true;
-                }
-            }
-        }
-        
-        // Final cleanup if all attempts failed
-        vkDestroyBuffer(device_, buffer, nullptr);
-        return false;
-    }
-
-    if (vkBindBufferMemory(device_, buffer, memory, 0) != VK_SUCCESS) {
-        std::cerr << "Failed to bind buffer memory" << std::endl;
-        vkFreeMemory(device_, memory, nullptr);
-        vkDestroyBuffer(device_, buffer, nullptr);
-        return false;
-    }
-
-    return true;
 }
 
 uint32_t VulkanTrainer::find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) {

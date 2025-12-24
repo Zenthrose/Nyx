@@ -63,6 +63,9 @@ void VulkanResourceManager::createBuffer(VkDeviceSize size, VkBufferUsageFlags u
         throw std::runtime_error("failed to bind buffer memory!");
     }
 
+    // Add to buffer pool for reuse
+    addToPool(size, usage, buffer, bufferMemory);
+
     // Track the buffer for cleanup
     trackedBuffers.push_back({buffer, bufferMemory});
 }
@@ -171,9 +174,22 @@ VkBuffer VulkanResourceManager::getPooledBuffer(VkDeviceSize size, VkBufferUsage
     return VK_NULL_HANDLE; // No suitable buffer found
 }
 
+void VulkanResourceManager::addToPool(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer buffer, VkDeviceMemory memory) {
+    std::lock_guard<std::mutex> lock(poolMutex);
+
+    VkDeviceSize totalPoolSize = 0;
+    for (const auto& pooled : bufferPool) {
+        totalPoolSize += pooled.size;
+    }
+
+    if (totalPoolSize + size <= MAX_POOL_SIZE) {
+        bufferPool.push_back({buffer, memory, size, usage, false});
+    }
+}
+
 void VulkanResourceManager::releaseBuffer(VkBuffer buffer, VkDeviceMemory memory) {
     std::lock_guard<std::mutex> lock(poolMutex);
-    
+
     for (auto& pooled : bufferPool) {
         if (pooled.buffer == buffer && pooled.memory == memory) {
             pooled.inUse = false;
@@ -217,7 +233,7 @@ void VulkanResourceManager::cleanupMemoryPool() {
 
 void VulkanResourceManager::cleanupUnusedBuffers() {
     std::lock_guard<std::mutex> lock(poolMutex);
-    
+
     auto it = bufferPool.begin();
     while (it != bufferPool.end()) {
         if (!it->inUse) {
@@ -231,6 +247,34 @@ void VulkanResourceManager::cleanupUnusedBuffers() {
         } else {
             ++it;
         }
+    }
+}
+
+bool VulkanResourceManager::isXeGPU() {
+    VkPhysicalDeviceProperties deviceProperties;
+    vkGetPhysicalDeviceProperties(physicalDevice, &deviceProperties);
+    std::string deviceName = deviceProperties.deviceName;
+    return deviceName.find("Iris") != std::string::npos ||
+           deviceName.find("Xe") != std::string::npos;
+}
+
+void VulkanResourceManager::createTiledBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                                             std::vector<VkBuffer>& buffers, std::vector<VkDeviceMemory>& memories, size_t tileSize) {
+    VkDeviceSize remainingSize = size;
+    VkDeviceSize offset = 0;
+
+    while (remainingSize > 0) {
+        VkDeviceSize currentTileSize = std::min(remainingSize, static_cast<VkDeviceSize>(tileSize));
+
+        VkBuffer buffer;
+        VkDeviceMemory memory;
+        createBuffer(currentTileSize, usage, properties, buffer, memory);
+
+        buffers.push_back(buffer);
+        memories.push_back(memory);
+
+        remainingSize -= currentTileSize;
+        offset += currentTileSize;
     }
 }
 

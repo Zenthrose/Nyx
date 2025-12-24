@@ -13,8 +13,8 @@ SelfModifyingHRM::SelfModifyingHRM(const SelfModifyingHRMConfig& config)
     : SelfEvolvingHRM(config.base_config), config_(config) {
     std::cout << "Initializing Self-Modifying HRM System..." << std::endl;
 
-    // Initialize self-modification components
-    code_analyzer_ = std::make_unique<CodeAnalysisSystem>(config.project_root);
+    // Initialize self-modification components with lazy loading to prevent memory exhaustion
+    code_analyzer_ = std::make_unique<CodeAnalysisSystem>(config.project_root, true, 500, 10); // lazy=true, max 500 files, 10MB per file
     runtime_compiler_ = std::make_unique<RuntimeCompilationSystem>(config.temp_compilation_dir);
     sandbox_manager_ = std::make_unique<SandboxManager>();
 

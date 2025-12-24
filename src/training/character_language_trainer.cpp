@@ -995,8 +995,9 @@ std::vector<std::string> CharacterLanguageTrainer::load_training_data(const std:
         return sequences;
     }
 
-// Check file size for chunking decision
+    // Check file size for streaming decision
     uintmax_t file_size = fs::file_size(data_path);
+    const uintmax_t STREAMING_THRESHOLD = 50 * 1024 * 1024; // 50MB threshold for streaming
     
     // Adaptive thresholding: combination of size and content type
     uintmax_t LARGE_FILE_THRESHOLD = 1024 * 1024; // 1MB base threshold
@@ -1013,97 +1014,69 @@ std::vector<std::string> CharacterLanguageTrainer::load_training_data(const std:
         return sequences;
     }
 
-    if (file_size > VERY_LARGE_FILE_THRESHOLD) {
-        // Very large files: use larger chunks for efficiency
-        std::cout << "Very large file detected (" << file_size << " bytes), using enhanced chunking..." << std::endl;
-        
-        std::string content;
-        content.reserve(file_size);
-        
-        // Read entire file
+    if (file_size > STREAMING_THRESHOLD) {
+        // Large files: use streaming to avoid loading entire file into memory
+        std::cout << "Large file detected (" << file_size << " bytes), using memory-efficient streaming..." << std::endl;
+
+        std::string current_sequence;
         std::string line;
+        size_t lines_read = 0;
+        const size_t BATCH_SIZE = 1000; // Process in batches
+
         while (std::getline(file, line)) {
-            content += line + "\n";
-        }
-        
-        // Process with larger chunks for very large files
-        for (size_t i = 0; i < content.length(); i += LARGE_CHUNK_SIZE - OVERLAP_SIZE) {
-            size_t chunk_end = std::min(i + LARGE_CHUNK_SIZE, content.length());
-            std::string chunk = content.substr(i, chunk_end - i);
-            
-            // Clean up chunk boundaries
-            if (chunk_end < content.length()) {
-                size_t last_space = chunk.find_last_of(" \t\n");
-                if (last_space != std::string::npos && last_space > LARGE_CHUNK_SIZE / 2) {
-                    chunk = chunk.substr(0, last_space);
+            current_sequence += line + "\n";
+            lines_read++;
+
+            // Process batch when it reaches threshold
+            if (lines_read >= BATCH_SIZE) {
+                if (!current_sequence.empty()) {
+                    // Extract sequences from current batch
+                    extract_sequences_from_text(current_sequence, sequences, data_percentage);
+                    current_sequence.clear();
                 }
-            }
-            
-            if (!chunk.empty() && chunk.length() >= config_.context_length) {
-                sequences.push_back(chunk);
-                
-                // Limit chunks from very large files
-                if (sequences.size() >= 1000) {
-                    std::cout << "Reached chunk limit for very large file, moving to next..." << std::endl;
-                    break;
-                }
+                lines_read = 0;
             }
         }
-        
-        std::cout << "Created " << sequences.size() << " enhanced chunks from very large file" << std::endl;
-        
-    } else if (file_size > LARGE_FILE_THRESHOLD) {
-        // Large files: use standard chunking
-        std::cout << "Large file detected (" << file_size << " bytes), using data chunking..." << std::endl;
-        
-        std::string content;
-        content.reserve(file_size);
-        
-        // Read entire file
-        std::string line;
-        while (std::getline(file, line)) {
-            content += line + "\n";
+
+        // Process remaining content
+        if (!current_sequence.empty()) {
+            extract_sequences_from_text(current_sequence, sequences, data_percentage);
         }
-        
-        // Process with standard chunks for large files
-        for (size_t i = 0; i < content.length(); i += BASE_CHUNK_SIZE - OVERLAP_SIZE) {
-            size_t chunk_end = std::min(i + BASE_CHUNK_SIZE, content.length());
-            std::string chunk = content.substr(i, chunk_end - i);
-            
-            // Clean up chunk boundaries
-            if (chunk_end < content.length()) {
-                size_t last_space = chunk.find_last_of(" \t\n");
-                if (last_space != std::string::npos && last_space > BASE_CHUNK_SIZE / 2) {
-                    chunk = chunk.substr(0, last_space);
-                }
-            }
-            
-            if (!chunk.empty() && chunk.length() >= config_.context_length) {
-                sequences.push_back(chunk);
-                
-                // Limit chunks from large files
-                if (sequences.size() >= 1000) {
-                    std::cout << "Reached chunk limit for large file, moving to next..." << std::endl;
-                    break;
-                }
-            }
-        }
-        
-        std::cout << "Created " << sequences.size() << " chunks from large file (data chunking)" << std::endl;
-        
     } else {
-        // Small files: process normally line by line
+        // Regular file processing for smaller files
+        std::string content;
         std::string line;
         while (std::getline(file, line)) {
-            if (!line.empty() && line.length() >= config_.context_length) {
-                sequences.push_back(line);
-            }
+            content += line + "\n";
         }
+        extract_sequences_from_text(content, sequences, data_percentage);
     }
 
-    file.close();
-    std::cout << "Loaded " << sequences.size() << " sequences from " << data_path << std::endl;
+    std::cout << "Loaded " << sequences.size() << " training sequences" << std::endl;
     return sequences;
+}
+
+// Helper function to extract sequences from text content
+void CharacterLanguageTrainer::extract_sequences_from_text(const std::string& content,
+                                                         std::vector<std::string>& sequences,
+                                                         float data_percentage) {
+    // Simple sequence extraction - split by newlines and filter by length
+    std::istringstream iss(content);
+    std::string line;
+    size_t total_lines = 0;
+
+    while (std::getline(iss, line)) {
+        total_lines++;
+        // Skip empty lines and very short sequences
+        if (line.length() >= config_.context_length && line.length() <= config_.max_seq_length) {
+            sequences.push_back(line);
+        }
+
+        // Apply data percentage sampling
+        if (data_percentage < 1.0f && total_lines % static_cast<size_t>(1.0f / data_percentage) != 0) {
+            continue;
+        }
+    }
 }
 
 std::vector<std::string> CharacterLanguageTrainer::scan_directory_async(const std::string& base_dir) {

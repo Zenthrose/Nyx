@@ -141,8 +141,11 @@ bool IdleLearningManager::perform_idle_learning_session() {
         success = process_accumulated_data();
 
         if (success) {
-            // Update learning models
-            success = update_learning_models();
+            // Only update learning models if we have data
+            if (!accumulated_data_.empty()) {
+                success = update_learning_models();
+            }
+            // If no data, consider it successful (nothing to do)
         }
 
         // Update session time

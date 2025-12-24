@@ -32,9 +32,16 @@ struct ResourceAwareTask {
 
 class ResourceAwareHRM : public SelfModifyingHRM {
 public:
-    ResourceAwareHRM(const ResourceAwareHRMConfig& config);
+    // Singleton pattern to prevent duplicate HRM instances
+    static std::shared_ptr<ResourceAwareHRM> getInstance(const ResourceAwareHRMConfig& config = ResourceAwareHRMConfig{});
+    static void destroyInstance();
+
     ~ResourceAwareHRM();
 
+private:
+    ResourceAwareHRM(const ResourceAwareHRMConfig& config);
+
+public:
     // Enhanced communication with resource awareness
     CommunicationResult communicate(const std::string& input_message);
 
@@ -100,11 +107,6 @@ public:
     std::pair<float, std::unordered_map<std::string, Tensor>> process_character_training_batch(
         const std::vector<std::string>& batch_sequences);
 
-private:
-    // Text generation (override)
-    std::string generate_text(const std::string& prompt, uint32_t max_length = 100) override;
-
-public:
     // Access to core HRM model
     HRM* get_hrm() { return SelfEvolvingHRM::get_hrm(); }
 
@@ -116,6 +118,8 @@ public:
     std::unordered_map<std::string, double> get_idle_learning_metrics() const;
 
 private:
+    // Text generation (override)
+    std::string generate_text(const std::string& prompt, uint32_t max_length = 100) override;
     // CPU fallback for character training batch processing
     std::pair<float, std::unordered_map<std::string, Tensor>> process_character_training_batch_cpu(
         const std::vector<std::string>& batch_sequences);

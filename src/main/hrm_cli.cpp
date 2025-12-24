@@ -506,7 +506,20 @@ Nyx::PrecisionLevel select_training_precision(const VulkanTrainingConfig& config
 
     size_t available_memory = hw_caps.gpu_memory_mb * 1024ULL * 1024ULL;
 
-    // Select precision based on memory availability
+    // Xe GPU specific: Force FP16 due to known Vulkan allocation issues
+    if (hw_caps.gpu_name.find("Iris") != std::string::npos ||
+        hw_caps.gpu_name.find("Xe") != std::string::npos ||
+        hw_caps.is_integrated_gpu) {
+        if (fp32_memory * 0.5 <= available_memory) {
+            return Nyx::PrecisionLevel::FP16;
+        } else if (fp32_memory * 0.25 <= available_memory) {
+            return Nyx::PrecisionLevel::INT8;
+        } else {
+            return Nyx::PrecisionLevel::INT4;
+        }
+    }
+
+    // Select precision based on memory availability for other GPUs
     if (fp32_memory <= available_memory) {
         return Nyx::PrecisionLevel::FP32;
     } else if (fp32_memory * 0.5 <= available_memory) {

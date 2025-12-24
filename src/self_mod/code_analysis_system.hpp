@@ -39,7 +39,7 @@ struct CodeModification {
 
 class CodeAnalysisSystem {
 public:
-    CodeAnalysisSystem(const std::string& project_root = ".");
+    CodeAnalysisSystem(const std::string& project_root = ".", bool lazy_load = true, size_t max_files = 500, size_t max_file_size_mb = 10);
     ~CodeAnalysisSystem() = default;
 
     // Core analysis functions
@@ -67,6 +67,10 @@ private:
     std::string project_root_;
     std::vector<std::string> source_files_;
     std::unordered_map<std::string, std::regex> bug_patterns_;
+    bool lazy_load_;
+    size_t max_files_;
+    size_t max_file_size_mb_;
+    bool files_discovered_;
 
     // Helper functions
     void discover_source_files();

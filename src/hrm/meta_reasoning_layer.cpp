@@ -6,8 +6,20 @@
 #include <cmath>
 #include <unordered_set>
 #include <filesystem>
+#include <atomic>
+
+// Evolutionary guard: Prevent duplicate HRM initializations
+static std::atomic<int> hrm_instance_count(0);
 
 MetaReasoningLayer::MetaReasoningLayer(const MetaReasoningConfig& config) : config_(config) {
+    // Evolutionary guard: Detect and warn about duplicate HRM initializations
+    int current_count = hrm_instance_count.fetch_add(1);
+    if (current_count > 0) {
+        std::cerr << "WARNING: Evolutionary guard detected duplicate HRM initialization (#" << (current_count + 1) << ")" << std::endl;
+        std::cerr << "This may indicate architectural issues causing memory conflicts and std::bad_alloc" << std::endl;
+        std::cerr << "Consider reviewing singleton pattern implementation in ResourceAwareHRM" << std::endl;
+    }
+
     std::cout << "Initializing Meta-Reasoning Layer..." << std::endl;
     std::cout << "Meta-Reasoning Layer initialized with self-repair "
               << (config_.enable_self_repair ? "enabled" : "disabled")

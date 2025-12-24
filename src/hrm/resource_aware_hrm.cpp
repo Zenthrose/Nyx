@@ -10,6 +10,24 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <mutex>
+
+// Singleton instance
+static std::shared_ptr<ResourceAwareHRM> hrm_instance = nullptr;
+static std::mutex hrm_mutex;
+
+std::shared_ptr<ResourceAwareHRM> ResourceAwareHRM::getInstance(const ResourceAwareHRMConfig& config) {
+    std::lock_guard<std::mutex> lock(hrm_mutex);
+    if (!hrm_instance) {
+        hrm_instance = std::shared_ptr<ResourceAwareHRM>(new ResourceAwareHRM(config));
+    }
+    return hrm_instance;
+}
+
+void ResourceAwareHRM::destroyInstance() {
+    std::lock_guard<std::mutex> lock(hrm_mutex);
+    hrm_instance.reset();
+}
 
 ResourceAwareHRM::ResourceAwareHRM(const ResourceAwareHRMConfig& config)
     : SelfModifyingHRM(config.base_config), config_(config), resource_pressure_mode_(false),
